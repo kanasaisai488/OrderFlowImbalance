@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Trading Strategy Visualizer</title>
+    <!-- External Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .chart {
+            width: 100%;
+            height: 400px;
+            border: 1px solid #ddd;
+            margin-bottom: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+        label {
+            margin-right: 10px;
+        }
+        input, select, button {
+            margin-right: 10px;
+            padding: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h2>Trading Strategy Visualizer</h2>
+
+    <!-- Date Range Selection -->
+    <div class="section">
+        <label for="dateRange">Date Range:</label>
+        <input type="text" id="dateRange" placeholder="Select date range">
+    </div>
+
+    <!-- Backtest Configuration -->
+    <div class="section">
+        <h3>Backtest Settings</h3>
+        <label for="lag">Lag:</label>
+        <select id="lag">
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="7">7</option>
+        </select>
+        <label for="delay">Delay (x): <span title="Sets time horizon (x) for backtest and regression (e.g., t+x return)">ℹ️</span></label>
+        <input type="number" id="delay" value="20" min="1">
+        <label for="threshold">Threshold:</label>
+        <input type="number" id="threshold" value="0.002" step="0.001">
+        <label for="strategy">Strategy:</label>
+        <select id="strategy">
+            <option value="A" selected>A</option>
+            <option value="B">B</option>
+        </select>
+        <button onclick="updateChart()">Run Backtest</button>
+    </div>
+
+    <!-- Regression Configuration -->
+    <div class="section">
+        <h3>Regression Analysis</h3>
+        <label for="factorSelect">factorSelect:</label>
+        <select id="factorSelect" multiple>
+            <option value="">Select Factor</option>
+            <option value="VOI">VOI</option>
+            <option value="OIR">OIR</option>
+            <option value="MPB">MPB</option>
+        </select>
+        <label for="outcomeSelect">Outcome:</label>
+        <select id="outcomeSelect">
+            <option value="">Select Outcome</option>
+            <option value="return">Return of t+x</option>
+            <option value="triple_barrier">Triple Barrier Method</option>
+        </select>
+        <label for="profitThreshold">Profit Threshold (%):</label>
+        <input type="number" id="profitThreshold" value="0.2" step="0.01">
+        <label for="stopLossThreshold">Stop Loss Threshold (%):</label>
+        <input type="number" id="stopLossThreshold" value="0.2" step="0.01">
+        <button onclick="plotRegression()">Plot Regression</button>
+        <button onclick="plotCausalGraph()">Plot Causal Graph</button>
+    </div>
+
+    <!-- Charts and Controls -->
+    <button id="autoscaleBtn">Autoscale Price Chart</button>
+    <div id="priceChart" class="chart"></div>
+    <div id="pnlChart" class="chart"></div>
+    <div id="regressionChart" class="chart"></div>
+
+    <!-- Results Tables -->
+    <h3>Opened Trades</h3>
+    <table id="tradesTable">
+        <thead>
+            <tr>
+                <th>Open Time</th>
+                <th>Open Price</th>
+                <th>Close Time</th>
+                <th>Close Price</th>
+                <th>PnL</th>
+            </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+    <h3>Performance Metrics</h3>
+    <table id="metricsTable">
+        <thead>
+            <tr>
+                <th>Metric</th>
+                <th>Value</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr><td>Profit Factor</td><td id="profitFactor"></td></tr>
+            <tr><td>Sharpe Ratio</td><td id="sharpeRatio"></td></tr>
+            <tr><td>Drawdown</td><td id="drawdown"></td></tr>
+        </tbody>
+    </table>
+
+    <script>
+        // Initialize ECharts instances with SVG renderer for performance
+        const priceChart = echarts.init(document.getElementById('priceChart'), null, { renderer: 'svg' });
+        const pnlChart = echarts.init(document.getElementById('pnlChart'), null, { renderer: 'svg' });
+        const regressionChart = echarts.init(document.getElementById('regressionChart'), null, { renderer: 'svg' });
+        document.getElementById('autoscaleBtn').addEventListener('click', autoscaleChart);
+
+        let availableDates = [];
+
+        // Utility function to downsample data for faster rendering
+        function downsample(array, maxPoints = 1000) {
+            if (array.length <= maxPoints) return array;
+            const step = Math.ceil(array.length / maxPoints);
+            return array.filter((_, idx) => idx % step === 0);
+        }
+
+        // Initialize Flatpickr for date range selection
+        fetch('/get_dates')
+            .then(response => response.json())
+            .then(dates => {
+                if (dates.error) {
+                    alert(dates.error);
+                    return;
+                }
+                availableDates = dates;
+                flatpickr("#dateRange", {
+                    mode: "range",
+                    dateFormat: "Y-m-d",
+                    enable: availableDates.map(date => new Date(date)),
+                    onChange: (selectedDates) => {
+                        if (selectedDates.length === 2) {
+                            updateChart();
+                        }
+                    }
+                });
+            })
+            .catch(error => console.error('Error fetching dates:', error));
+
+        // Fetch and display backtest results
+        function updateChart() {
+            const dateRange = document.getElementById('dateRange').value;
+            if (!dateRange) {
+                alert('Please select a date range.');
+                return;
+            }
+            const [startDate, endDate] = dateRange.split(' to ');
+            const lag = document.getElementById('lag').value;
+            const delay = document.getElementById('delay').value;
+            const threshold = document.getElementById('threshold').value;
+            const strategy = document.getElementById('strategy').value;
+
+            fetch(`/run_strategy_range?start=${startDate}&end=${endDate}&lag=${lag}&delay=${delay}&threshold=${threshold}&strategy=${strategy}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(data.error);
+                        priceChart.clear();
+                        pnlChart.clear();
+                        document.getElementById('tradesTable').querySelector('tbody').innerHTML = '';
+                        document.getElementById('profitFactor').textContent = '';
+                        document.getElementById('sharpeRatio').textContent = '';
+                        document.getElementById('drawdown').textContent = '';
+                        return;
+                    }
+
+                    const pnlSeries = data.pnl_series;
+                    // Downsample data for performance
+                    const time = downsample(pnlSeries.map(d => d.time));
+                    const bidPrice = downsample(pnlSeries.map(d => d.bid_price));
+                    const askPrice = downsample(pnlSeries.map(d => d.ask_price));
+                    const midPrice = downsample(pnlSeries.map(d => d.mid_price));
+                    const pnl = downsample(pnlSeries.map(d => d.pnl));
+                    const trades = data.trades;
+                    const metrics = data.metrics;
+
+                    const buyPoints = trades.map(t => ({
+                        xAxis: t.open_time,
+                        yAxis: t.open_price,
+                        symbol: 'triangle',
+                        symbolSize: 10,
+                        itemStyle: { color: 'green' }
+                    }));
+                    const sellPoints = trades.map(t => ({
+                        xAxis: t.close_time,
+                        yAxis: t.close_price,
+                        symbol: 'triangle',
+                        symbolSize: 10,
+                        itemStyle: { color: 'red' }
+                    }));
+
+                    // Update price chart
+                    priceChart.setOption({
+                        title: { text: 'Price Chart with Trade Signals', left: 'center' },
+                        tooltip: { trigger: 'axis' },
+                        legend: { data: ['Bid', 'Ask', 'Mid'], bottom: 10 },
+                        xAxis: { name: 'Time (s)', data: time },
+                        yAxis: { name: 'Price' },
+                        dataZoom: [
+                            { type: 'inside', xAxisIndex: 0, filterMode: 'none' },
+                            { type: 'slider', xAxisIndex: 0, filterMode: 'none', height: 20, bottom: 30 },
+                            { type: 'inside', yAxisIndex: 0, filterMode: 'none' }
+                        ],
+                        series: [
+                            { name: 'Bid', type: 'line', data: bidPrice, lineStyle: { color: '#1f77b4' } },
+                            { name: 'Ask', type: 'line', data: askPrice, lineStyle: { color: '#ff9900' } },
+                            { name: 'Mid', type: 'line', data: midPrice, lineStyle: { color: '#2ca02c' } },
+                            { name: 'Trades', type: 'scatter', data: buyPoints.concat(sellPoints), symbolSize: 10, itemStyle: { color: d => d.itemStyle.color } }
+                        ]
+                    });
+                    priceChart.priceData = { time, bidPrice, askPrice, midPrice, buyPoints, sellPoints };
+
+                    // Update PnL chart
+                    pnlChart.setOption({
+                        title: { text: 'Equity Curve (PnL)', left: 'center' },
+                        tooltip: { trigger: 'axis' },
+                        xAxis: { name: 'Time (s)', data: time },
+                        yAxis: { name: 'PnL' },
+                        series: [{ name: 'PnL', type: 'line', data: pnl, lineStyle: { color: '#d62728' } }]
+                    });
+
+                    // Update trades table efficiently with innerHTML
+                    const tradesTableBody = document.getElementById('tradesTable').querySelector('tbody');
+                    let tradesHtml = '';
+                    trades.forEach(trade => {
+                        tradesHtml += `
+                            <tr>
+                                <td>${trade.open_time}</td>
+                                <td>${trade.open_price.toFixed(2)}</td>
+                                <td>${trade.close_time}</td>
+                                <td>${trade.close_price.toFixed(2)}</td>
+                                <td>${trade.pnl.toFixed(2)}</td>
+                            </tr>
+                        `;
+                    });
+                    tradesTableBody.innerHTML = tradesHtml;
+
+                    // Update performance metrics
+                    document.getElementById('profitFactor').textContent = metrics.profit_factor.toFixed(2);
+                    document.getElementById('sharpeRatio').textContent = metrics.sharpe_ratio.toFixed(2);
+                    document.getElementById('drawdown').textContent = metrics.drawdown.toFixed(2);
+                })
+                .catch(error => console.error('Error fetching strategy results:', error));
+        }
+
+        function plotCausalGraph() {
+            const factors = Array.from(document.getElementById('factorSelect').selectedOptions).map(option => option.value);
+            const outcome = document.getElementById('outcomeSelect').value;
+            const dateRange = document.getElementById('dateRange').value;
+            const delay = document.getElementById('delay').value || 20;
+
+            if (!factors.length || !outcome || !dateRange) {
+                alert('Please select at least one factor, an outcome, and a date range.');
+                return;
+            }
+            const [startDate, endDate] = dateRange.split(' to ');
+
+            fetch(`/get_causal_graph?factors=${factors.join(',')}&outcome=${outcome}&start=${startDate}&end=${endDate}&delay=${delay}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(data.error);
+                        return;
+                    }
+                    document.getElementById('causalGraphContainer').innerHTML = 
+                        `<img src="data:image/png;base64,${data.graph_image}" alt="Causal Graph">`;
+                })
+                .catch(error => console.error('Error fetching causal graph:', error));
+        }    
+
+        // Fetch and plot regression data
+        function plotRegression() {
+            const factor = document.getElementById('factorSelect').value;
+            const outcome = document.getElementById('outcomeSelect').value;
+            const dateRange = document.getElementById('dateRange').value;
+            const delay = document.getElementById('delay').value || 20;
+            const profitThreshold = document.getElementById('profitThreshold').value;
+            const stopLossThreshold = document.getElementById('stopLossThreshold').value;
+
+            if (!factor || !outcome || !dateRange) {
+                alert('Please select a factor, outcome, and date range.');
+                return;
+            }
+            const [startDate, endDate] = dateRange.split(' to ');
+
+            fetch(`/get_regression_data?factor=${factor}&outcome=${outcome}&start=${startDate}&end=${endDate}&delay=${delay}&profitThreshold=${profitThreshold}&stopLossThreshold=${stopLossThreshold}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        alert(data.error);
+                        regressionChart.clear();
+                        return;
+                    }
+                    // Downsample regression data
+                    const x = downsample(data.x);
+                    const y = downsample(data.y);
+                    const line = downsample(data.line);
+
+                    regressionChart.setOption({
+                        title: { text: `Regression: ${factor} vs ${outcome}`, left: 'center' },
+                        tooltip: { trigger: 'axis' },
+                        xAxis: { name: factor, type: 'value', scale: true },
+                        yAxis: { name: outcome, type: 'value', scale: true },
+                        series: [
+                            { type: 'scatter', data: y.map((val, idx) => [x[idx], val]) },
+                            { type: 'line', data: line.map((val, idx) => [x[idx], val]), lineStyle: { color: 'red' } }
+                        ]
+                    });
+                })
+                .catch(error => console.error('Error fetching regression data:', error));
+        }
+
+        // Autoscale the price chart based on visible data
+        function autoscaleChart() {
+            const zoom = priceChart.getOption().dataZoom[0];
+            const startIndex = Math.floor(zoom.startValue || 0);
+            const endIndex = Math.ceil(zoom.endValue || priceChart.priceData.time.length - 1);
+
+            const visibleBid = priceChart.priceData.bidPrice.slice(startIndex, endIndex + 1);
+            const visibleAsk = priceChart.priceData.askPrice.slice(startIndex, endIndex + 1);
+            const visibleMid = priceChart.priceData.midPrice.slice(startIndex, endIndex + 1);
+            const visibleBuyPoints = priceChart.priceData.buyPoints.filter(p => p.xAxis >= priceChart.priceData.time[startIndex] && p.xAxis <= priceChart.priceData.time[endIndex]);
+            const visibleSellPoints = priceChart.priceData.sellPoints.filter(p => p.xAxis >= priceChart.priceData.time[startIndex] && p.xAxis <= priceChart.priceData.time[endIndex]);
+
+            const allPrices = visibleBid.concat(visibleAsk, visibleMid, visibleBuyPoints.map(p => p.yAxis), visibleSellPoints.map(p => p.yAxis));
+            const minPrice = Math.min(...allPrices);
+            const maxPrice = Math.max(...allPrices);
+
+            const priceRange = maxPrice - minPrice;
+            const padding = priceRange * 0.05;
+            const yMin = minPrice - padding;
+            const yMax = maxPrice + padding;
+
+            priceChart.setOption({
+                yAxis: { min: yMin, max: yMax }
+            });
+        }
+    </script>
+</body>
+</html>
