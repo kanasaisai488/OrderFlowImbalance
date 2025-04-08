@@ -1,2 +1,3 @@
 .qodo
-data
+# Ignore the data directory and everything inside it
+data/
